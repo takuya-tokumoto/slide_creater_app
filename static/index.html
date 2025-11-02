@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ES入力 - スライド作成アプリ</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📝 スライド作成アプリ</h1>
+            <p>ES（自己PR等）を入力して、スライド構成案を自動生成します</p>
+        </header>
+
+        <main>
+            <div id="sections-container">
+                <!-- セクションがここに追加される -->
+            </div>
+
+            <div class="button-group">
+                <button onclick="addSection()" class="btn btn-secondary">
+                    ➕ セクションを追加
+                </button>
+                <button onclick="generateSlides()" class="btn btn-primary">
+                    🚀 構成案を生成
+                </button>
+            </div>
+
+            <div id="loading" class="loading hidden">
+                <div class="spinner"></div>
+                <p>構成案を生成中...</p>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let sectionCount = 0;
+
+        // 初期セクションを追加
+        window.addEventListener('DOMContentLoaded', () => {
+            addSection();
+        });
+
+        function addSection() {
+            sectionCount++;
+            const container = document.getElementById('sections-container');
+
+            const sectionDiv = document.createElement('div');
+            sectionDiv.className = 'section-card';
+            sectionDiv.id = `section-${sectionCount}`;
+
+            sectionDiv.innerHTML = `
+                <div class="section-header">
+                    <input type="text"
+                           class="section-title"
+                           placeholder="セクションのタイトル（例: 自己紹介、強み、実績）"
+                           value="${sectionCount === 1 ? '自己紹介' : ''}">
+                    <button onclick="removeSection(${sectionCount})" class="btn-remove">
+                        🗑️
+                    </button>
+                </div>
+                <textarea class="section-content"
+                          placeholder="本文を入力してください&#10;&#10;例：&#10;私は〇〇大学で△△を専攻しています。&#10;これまで□□のプロジェクトに取り組み、◇◇の成果を上げました。"
+                          rows="6"></textarea>
+            `;
+
+            container.appendChild(sectionDiv);
+        }
+
+        function removeSection(id) {
+            const section = document.getElementById(`section-${id}`);
+            if (section) {
+                section.remove();
+            }
+        }
+
+        async function generateSlides() {
+            // セクション情報を収集
+            const sections = [];
+            const sectionCards = document.querySelectorAll('.section-card');
+
+            sectionCards.forEach(card => {
+                const title = card.querySelector('.section-title').value.trim();
+                const content = card.querySelector('.section-content').value.trim();
+
+                // 本文が空でないセクションのみ追加
+                if (content) {
+                    sections.push({ title, content });
+                }
+            });
+
+            if (sections.length === 0) {
+                alert('少なくとも1つのセクションに本文を入力してください。');
+                return;
+            }
+
+            // ローディング表示
+            document.getElementById('loading').classList.remove('hidden');
+
+            try {
+                const response = await fetch('/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ sections })
+                });
+
+                if (!response.ok) {
+                    throw new Error('生成に失敗しました');
+                }
+
+                const data = await response.json();
+
+                // スライド確認画面に遷移（データをlocalStorageに保存）
+                localStorage.setItem('slidesData', JSON.stringify(data.slides));
+                window.location.href = '/static/slides.html';
+
+            } catch (error) {
+                console.error('Error:', error);
+                alert('構成案の生成に失敗しました。');
+            } finally {
+                document.getElementById('loading').classList.add('hidden');
+            }
+        }
+    </script>
+</body>
+</html>
