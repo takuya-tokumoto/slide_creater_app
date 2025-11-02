@@ -108,7 +108,9 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('生成に失敗しました');
+                    // サーバーからのエラーメッセージを取得
+                    const errorData = await response.json().catch(() => ({ detail: '不明なエラーが発生しました' }));
+                    throw new Error(errorData.detail || '生成に失敗しました');
                 }
 
                 const data = await response.json();
@@ -119,7 +121,7 @@
 
             } catch (error) {
                 console.error('Error:', error);
-                alert('構成案の生成に失敗しました。');
+                alert(`構成案の生成に失敗しました。\n\n詳細: ${error.message}`);
             } finally {
                 document.getElementById('loading').classList.add('hidden');
             }
