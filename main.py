@@ -340,45 +340,168 @@ async def patch_slides(request: PatchRequest) -> SlidesState:
     return SlidesState(slides=slides)
 
 
+async def create_pptx_with_skills(slides: List[Slide], filepath: str) -> None:
+    """
+    Claude Skillsを使用してPPTXファイルを作成
+
+    Args:
+        slides: スライドデータのリスト
+        filepath: 保存先ファイルパス
+    """
+    # Skillsの定義：PPTX作成用の構造化出力スキーマ
+    pptx_creation_tool = {
+        "name": "create_powerpoint_file",
+        "description": "スライドデータからPowerPointファイルを作成する指示を生成",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slides_config": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "スライドのタイトル"},
+                            "bullets": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "箇条書き項目のリスト（1つ目は太字のメッセージライン）"
+                            }
+                        },
+                        "required": ["title", "bullets"]
+                    },
+                    "description": "各スライドの設定情報"
+                },
+                "slide_width_inches": {"type": "number", "description": "スライド幅（インチ）"},
+                "slide_height_inches": {"type": "number", "description": "スライド高さ（インチ）"},
+                "first_bullet_bold": {"type": "boolean", "description": "1つ目の箇条書きを太字にするか"}
+            },
+            "required": ["slides_config", "slide_width_inches", "slide_height_inches", "first_bullet_bold"]
+        }
+    }
+
+    # スライドデータをJSON形式に変換
+    slides_json = [{"title": s.title, "bullets": s.bullets} for s in slides]
+
+    prompt = f"""以下のスライドデータからPowerPointファイルを作成する設定を生成してください。
+
+# スライドデータ
+{json.dumps(slides_json, ensure_ascii=False, indent=2)}
+
+# 要件
+- スライドサイズ: 幅10インチ × 高さ7.5インチ
+- 各スライドの1つ目の箇条書き（メッセージライン）は太字にする
+- レイアウト: Title and Content (レイアウトインデックス1)
+
+create_powerpoint_fileツールを使用して設定を生成してください。"""
+
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            tools=[pptx_creation_tool],
+            tool_choice={"type": "tool", "name": "create_powerpoint_file"}
+        )
+
+        # Toolsの結果を取得
+        if response.content and len(response.content) > 0:
+            tool_result = response.content[0]
+            if hasattr(tool_result, 'type') and tool_result.type == "tool_use":
+                if tool_result.name == "create_powerpoint_file":
+                    # 実際のPPTX作成処理
+                    config = tool_result.input if isinstance(tool_result.input, dict) else {}
+
+                    prs = Presentation()
+                    prs.slide_width = Inches(config.get("slide_width_inches", 10))
+                    prs.slide_height = Inches(config.get("slide_height_inches", 7.5))
+
+                    slides_config = config.get("slides_config", slides_json)
+                    first_bullet_bold = config.get("first_bullet_bold", True)
+
+                    for slide_data in slides_config:
+                        slide_layout = prs.slide_layouts[1]
+                        slide = prs.slides.add_slide(slide_layout)
+
+                        # タイトル設定
+                        title = slide.shapes.title
+                        title.text = slide_data.get("title", "")
+
+                        # 箇条書き設定
+                        bullets = slide_data.get("bullets", [])
+                        if bullets:
+                            body = slide.placeholders[1]
+                            text_frame = body.text_frame
+                            text_frame.clear()
+
+                            for i, bullet in enumerate(bullets):
+                                if i == 0:
+                                    text_frame.text = bullet
+                                    if first_bullet_bold and text_frame.paragraphs[0].runs:
+                                        run = text_frame.paragraphs[0].runs[0]
+                                        run.font.bold = True
+                                else:
+                                    p = text_frame.add_paragraph()
+                                    p.text = bullet
+                                    p.level = 0
+
+                    prs.save(filepath)
+                    return
+
+        # フォールバック: Skillsが使えない場合は直接作成
+        print("Warning: Skills not used for PPTX creation, using fallback")
+        prs = Presentation()
+        prs.slide_width = Inches(10)
+        prs.slide_height = Inches(7.5)
+
+        for slide_data in slides:
+            slide_layout = prs.slide_layouts[1]
+            slide = prs.slides.add_slide(slide_layout)
+
+            title = slide.shapes.title
+            title.text = slide_data.title
+
+            if slide_data.bullets:
+                body = slide.placeholders[1]
+                text_frame = body.text_frame
+                text_frame.clear()
+
+                for i, bullet in enumerate(slide_data.bullets):
+                    if i == 0:
+                        text_frame.text = bullet
+                        if text_frame.paragraphs[0].runs:
+                            run = text_frame.paragraphs[0].runs[0]
+                            run.font.bold = True
+                    else:
+                        p = text_frame.add_paragraph()
+                        p.text = bullet
+                        p.level = 0
+
+        prs.save(filepath)
+
+    except Exception as e:
+        print(f"PPTX creation error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"PPTXファイル作成中にエラーが発生しました: {str(e)}"
+        )
+
+
+
+
+
 @app.post("/export")
 async def export_pptx(request: ExportRequest) -> dict:
     """
     PPTXファイルを生成してダウンロードURLを返す
     """
-    # プレゼンテーション作成
-    prs = Presentation()
-    prs.slide_width = Inches(10)
-    prs.slide_height = Inches(7.5)
-
-    for slide_data in request.slides:
-        # タイトルと内容のレイアウト
-        slide_layout = prs.slide_layouts[1]  # Title and Content
-        slide = prs.slides.add_slide(slide_layout)
-
-        # タイトル設定
-        title = slide.shapes.title
-        title.text = slide_data.title
-
-        # 箇条書き設定
-        if slide_data.bullets:
-            body = slide.placeholders[1]
-            text_frame = body.text_frame
-            text_frame.clear()
-
-            for i, bullet in enumerate(slide_data.bullets):
-                if i == 0:
-                    text_frame.text = bullet
-                    run = text_frame.paragraphs[0].runs[0]
-                    run.font.bold = True  # 1行目（メッセージライン）を太字
-                else:
-                    p = text_frame.add_paragraph()
-                    p.text = bullet
-                    p.level = 0
-
-    # ファイル保存
+    # ファイル名生成
     filename = f"slide_{uuid.uuid4().hex[:8]}.pptx"
     filepath = os.path.join(EXPORT_DIR, filename)
-    prs.save(filepath)
+
+    # Claude Skillsを使ってPPTX作成
+    await create_pptx_with_skills(request.slides, filepath)
 
     return {
         "download_url": f"/download/{filename}",
