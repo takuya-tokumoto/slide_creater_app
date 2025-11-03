@@ -80,81 +80,55 @@ async def root():
     return FileResponse("static/index.html")
 
 
-async def generate_slides_with_llm(sections: List[Section]) -> List[Slide]:
+class MessageLineSlide(BaseModel):
+    """メッセージラインとタイトルのみを含むスライド"""
+    title: str
+    message_line: str  # 40文字以内の核心メッセージ
+
+
+async def generate_message_lines(sections: List[Section]) -> List[MessageLineSlide]:
     """
-    LLMを使用してスライド構成を生成
+    Step1: メッセージラインを生成する
+    各スライドの核心メッセージ（1~2行・80文字以内）とタイトルを決定
     """
-    # セクション情報を整形
     sections_text = "\n\n".join([
         f"【{section.title}】\n{section.content}"
         for section in sections
     ])
 
-    prompt = f"""以下の自己PR・ES情報から、効果的なプレゼンテーションスライドの構成を作成してください。
+    prompt = f"""以下の自己PR・ES情報を分析し、効果的なプレゼンテーションスライドのメッセージラインを決定してください。
 
 # 入力情報
 {sections_text}
 
-# スライド生成の2段階アプローチ
-
-## ステップ1: メッセージラインの決定
-各スライドで「伝えたいこと」を1行のメッセージラインとして定義してください：
-- 入力情報全体を分析し、各スライドの核心メッセージを決定
-- 40文字以内で簡潔に表現
-- 事実と示唆を統合した形で記述
-- プレフィックス（「事実:」「示唆:」など）は不要
-
-## ステップ2: ボディの生成
-決定したメッセージラインと元データ（入力情報）を参照して、ボディを生成：
-- メッセージラインで伝えたいことの根拠や背景を元データから抽出
-- 元データにある具体的な事例やデータを引用
-- メッセージラインを補強する情報を3-5個の箇条書きにまとめる
-- 元データに記載されていることを優先的に使用
-
-# スライド構造
-各スライドは以下の構造：
-
-```
-bullets[0]: メッセージライン（伝えたいこと・太字表示）
-bullets[1]: 元データからの根拠・背景情報
-bullets[2]: 元データからの具体例・データ
-bullets[3]: メッセージラインを補足する詳細説明
-bullets[4]: （必要に応じて）行動項目や検討ポイント
-```
+# 要件
+1. 入力情報全体を分析し、各スライドの核心メッセージを1~2行で定義（80文字以内）
+2. 事実と示唆を統合した形で記述（プレフィックス不要）
+3. 最初のスライドはタイトルスライド（全体の目的を明示）
+4. 最後にまとめスライド（結論と次アクション）
+5. 全体で5-8枚程度のスライド
+6. 情報を適切にグループ化し、ストーリー性を持たせる
 
 # 出力形式
 以下のJSON配列形式で返してください：
 
 ```json
-[
-  {{
-    "title": "スライドのタイトル",
-    "bullets": [
-      "このスライドで伝えたい核心メッセージ（40文字以内）",
-      "元データに基づく根拠や背景",
-      "元データからの具体的な事例",
-      "メッセージを補足する説明",
-      "（必要に応じて）行動項目"
-    ]
-  }}
-]
+{{
+  "slides": [
+    {{
+      "title": "スライドのタイトル",
+      "message_line": "核心メッセージ（80文字以内）"
+    }}
+  ]
+}}
 ```
-
-# 全体要件
-1. 最初のスライドはタイトルスライドにする（メッセージラインで全体の目的を明示）
-2. 各スライドは4-6個の箇条書き（メッセージライン1行 + ボディ3-5行）
-3. 最後にまとめスライドを追加（メッセージラインで結論と次アクション）
-4. 全体で5-8枚程度のスライドにする
-5. 情報を適切にグループ化し、ストーリー性を持たせる
-6. ボディは必ず元データ（入力情報）を参照し、メッセージラインを裏付けるものにする
-7. 元データにない情報は極力避け、入力情報に忠実に基づく
 
 JSON配列のみを返してください（説明文は不要）。"""
 
     try:
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4000,
+            max_tokens=2000,
             messages=[
                 {"role": "user", "content": prompt}
             ]
@@ -163,25 +137,149 @@ JSON配列のみを返してください（説明文は不要）。"""
         # レスポンスからJSONを抽出
         content = response.content[0].text
 
-        # ```json ``` で囲まれている場合は抽出
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0].strip()
         elif "```" in content:
             content = content.split("```")[1].split("```")[0].strip()
 
         # JSONをパース
-        slides_data = json.loads(content)
-
-        # Slideオブジェクトに変換
-        slides = [Slide(**slide) for slide in slides_data]
-        return slides
+        data = json.loads(content)
+        message_lines = [MessageLineSlide(**slide) for slide in data.get("slides", [])]
+        return message_lines
 
     except Exception as e:
-        print(f"LLM generation error: {e}")
+        print(f"Message line generation error: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"スライド生成中にエラーが発生しました: {str(e)}"
+            detail=f"メッセージライン生成中にエラーが発生しました: {str(e)}"
         )
+
+
+async def generate_slide_bodies_with_skills(
+    message_line_slides: List[MessageLineSlide],
+    sections: List[Section]
+) -> List[Slide]:
+    """
+    Step2: Claude Skills（tools）を使用してボディ部分を生成
+    メッセージラインと元データから、スライドテンプレートに従ってボディを抽出・生成
+    """
+    sections_text = "\n\n".join([
+        f"【{section.title}】\n{section.content}"
+        for section in sections
+    ])
+
+    # Skills（tools）の定義：ボディ生成用の構造化出力スキーマ
+    slide_body_tool = {
+        "name": "generate_slide_body",
+        "description": "メッセージラインに基づいて、元データからボディ部分を抽出・生成する",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "bullets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "メッセージラインを裏付ける箇条書き（3-5個）。元データから具体的な根拠・事例・データを引用"
+                }
+            },
+            "required": ["bullets"]
+        }
+    }
+
+    all_slides = []
+
+    # 各メッセージラインに対してボディを生成
+    for msg_slide in message_line_slides:
+        prompt = f"""以下の情報を基に、スライドのボディ部分を生成してください。
+
+# 元データ（入力情報）
+{sections_text}
+
+# このスライドの情報
+- タイトル: {msg_slide.title}
+- メッセージライン: {msg_slide.message_line}
+
+# 要件
+1. メッセージライン「{msg_slide.message_line}」を裏付ける情報を元データから抽出
+2. 元データに記載されている具体的な根拠・事例・データを優先的に使用
+3. 3-5個の箇条書きで構成（各項目は30文字以内が目安）
+4. 元データにない情報は極力避け、入力情報に忠実に基づく
+5. 以下の順序で構成：
+   - 1つ目: 元データからの根拠・背景情報
+   - 2つ目: 元データからの具体例・データ
+   - 3つ目: メッセージラインを補足する詳細説明
+   - 4つ目以降: （必要に応じて）行動項目や検討ポイント
+
+generate_slide_bodyツールを使用してボディを生成してください。"""
+
+        try:
+            response = anthropic_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2000,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                tools=[slide_body_tool],
+                tool_choice={"type": "tool", "name": "generate_slide_body"}
+            )
+
+            # Toolsの結果を取得
+            if response.content and len(response.content) > 0:
+                tool_result = response.content[0]
+                if hasattr(tool_result, 'type') and tool_result.type == "tool_use":
+                    if tool_result.name == "generate_slide_body":
+                        # inputはdictまたは適切な形式で提供される
+                        if isinstance(tool_result.input, dict):
+                            body_bullets = tool_result.input.get("bullets", [])
+                        else:
+                            # フォールバック: inputがdictでない場合
+                            body_bullets = getattr(tool_result.input, "bullets", [])
+                        
+                        # メッセージラインを先頭に追加
+                        full_bullets = [msg_slide.message_line] + body_bullets
+                        
+                        all_slides.append(Slide(
+                            title=msg_slide.title,
+                            bullets=full_bullets
+                        ))
+                    else:
+                        # 想定外のtool名
+                        print(f"Warning: Unexpected tool name '{tool_result.name}'")
+                        all_slides.append(Slide(
+                            title=msg_slide.title,
+                            bullets=[msg_slide.message_line, "詳細情報を元データから抽出してください"]
+                        ))
+            else:
+                # Toolsが使えない場合のフォールバック
+                print(f"Warning: Tools not used for slide '{msg_slide.title}', using fallback")
+                all_slides.append(Slide(
+                    title=msg_slide.title,
+                    bullets=[msg_slide.message_line, "詳細情報を元データから抽出してください"]
+                ))
+
+        except Exception as e:
+            print(f"Body generation error for slide '{msg_slide.title}': {e}")
+            # エラー時はメッセージラインのみでスライドを作成
+            all_slides.append(Slide(
+                title=msg_slide.title,
+                bullets=[msg_slide.message_line]
+            ))
+
+    return all_slides
+
+
+async def generate_slides_with_llm(sections: List[Section]) -> List[Slide]:
+    """
+    LLMを使用してスライド構成を生成（2段階アプローチ）
+    Step1: メッセージライン生成
+    Step2: Skills機能でボディ生成
+    """
+    # Step1: メッセージラインを生成
+    message_line_slides = await generate_message_lines(sections)
+    
+    # Step2: メッセージラインと元データからボディを生成
+    slides = await generate_slide_bodies_with_skills(message_line_slides, sections)
+    
+    return slides
 
 
 @app.post("/generate")
